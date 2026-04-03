@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/csv"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -15,6 +16,43 @@ type contextKey string
 
 const userIDKey contextKey = "userID"
 
+// UserRecord represents a row from the CSV
+type UserRecord struct {
+	UserID string
+	Token  string
+	Tier   string
+}
+
+func LoadUsersFromCSV(path string) ([]UserRecord, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening csv: %w", err)
+	}
+	defer f.Close()
+
+	r := csv.NewReader(f)
+	rows, err := r.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("reading csv: %w", err)
+	}
+
+	var users []UserRecord
+	for i, row := range rows {
+		if i == 0 {
+			continue // skip header
+		}
+		if len(row) < 3 {
+			return nil, fmt.Errorf("row %d: expected 3 columns, got %d", i, len(row))
+		}
+		users = append(users, UserRecord{
+			UserID: row[0],
+			Token:  row[1],
+			Tier:   row[2],
+		})
+	}
+	return users, nil
+}
+
 type Limiter interface {
 	Allow() bool
 }
@@ -26,10 +64,10 @@ type LimiterSet interface {
 type MemLimiterSet struct {
 	mu         sync.Mutex
 	limiters   map[string]Limiter
-	newLimiter func() Limiter
+	newLimiter func(string) Limiter
 }
 
-func NewMemLimiterSet(newLimiter func() Limiter) *MemLimiterSet {
+func NewMemLimiterSet(newLimiter func(key string) Limiter) *MemLimiterSet {
 	limiters := make(map[string]Limiter)
 	return &MemLimiterSet{limiters: limiters, newLimiter: newLimiter}
 }
@@ -42,11 +80,13 @@ func (m *MemLimiterSet) Get(key string) Limiter {
 
 	limiter, exists := m.limiters[key]
 	if !exists {
-		limiter = m.newLimiter()
+		limiter = m.newLimiter(key)
 		m.limiters[key] = limiter
 	}
 	return limiter
 }
+
+// --- implementations of limiters
 
 type FixedWindowLimiter struct {
 	mu        sync.Mutex
@@ -303,13 +343,9 @@ func (v FakeValidator) Validate(tokenString string) (Claims, error) {
 
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
-	// establish any configuration
-	// construct dependencies
-	// start services if necessary
-	// start server
 
 	// configure the settings for a token bucket limiter
-	newTokenBucketLimiter := func() Limiter {
+	newTokenBucketLimiter := func(_ string) Limiter {
 		limit := 5
 		refill := 10
 		duration := 1 * time.Minute
