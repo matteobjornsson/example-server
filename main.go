@@ -328,17 +328,23 @@ const user1Id = "user1"
 const user2Token = "token2"
 const user2Id = "user2"
 
-type FakeValidator struct{}
+type UserValidator struct {
+	users []UserRecord
+}
 
-func (v FakeValidator) Validate(tokenString string) (Claims, error) {
-	switch tokenString {
-	case user1Token:
-		return Claims{UserID: user1Id}, nil
-	case user2Token:
-		return Claims{UserID: user2Id}, nil
-	default:
-		return Claims{}, errors.New("invalid Token")
+func NewUserValidator(users []UserRecord) *UserValidator {
+	return &UserValidator{
+		users: users,
 	}
+}
+
+func (v *UserValidator) Validate(tokenString string) (Claims, error) {
+	for _, u := range v.users {
+		if u.Token == tokenString {
+			return Claims{UserID: u.UserID}, nil
+		}
+	}
+	return Claims{}, errors.New("invalid token")
 }
 
 // allowed requests per minute
@@ -386,8 +392,9 @@ func main() {
 	}
 
 	limiterSet := NewMemLimiterSet(newSlidingWindowLimiterByUserLookup)
+	tokenValidator := NewUserValidator(users)
 
-	middleware := NewMiddleware(&FakeValidator{}, limiterSet)
+	middleware := NewMiddleware(tokenValidator, limiterSet)
 
 	srv := &http.Server{
 		Addr:    ":8080",
