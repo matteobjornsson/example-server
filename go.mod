@@ -1,3 +1,3 @@
-module rate
+module github.com/matteobjornsson/example-server
 
-go 1.24
+go 1.24.10
