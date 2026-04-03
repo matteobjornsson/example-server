@@ -242,7 +242,20 @@ func NewAuthMiddleware(validator JWTValidator) func(http.Handler) http.Handler {
 	}
 }
 
-func infoHandler(w http.ResponseWriter, r *http.Request) {
+func NewMiddleware(
+	validator JWTValidator,
+	multiLimiter LimiterSet,
+) func(http.Handler) http.Handler {
+	authMiddleware := NewAuthMiddleware(validator)
+	rateLimitMiddleware := NewRateLimitMiddleware(multiLimiter)
+
+	return func(next http.Handler) http.Handler {
+		// wrap outside->in for call order
+		return authMiddleware(rateLimitMiddleware(next))
+	}
+}
+
+func appHandler(w http.ResponseWriter, r *http.Request) {
 	userID, ok := r.Context().Value(userIDKey).(string)
 	if !ok || userID == "" {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -257,22 +270,15 @@ func infoHandler(w http.ResponseWriter, r *http.Request) {
 	slog.Debug("request processed", "userId", userID)
 }
 
-func NewMiddleware(
-	validator JWTValidator,
-	multiLimiter LimiterSet,
-) func(http.Handler) http.Handler {
-	authMiddleware := NewAuthMiddleware(validator)
-	rateLimitMiddleware := NewRateLimitMiddleware(multiLimiter)
-
-	return func(next http.Handler) http.Handler {
-		// wrap outside->in for call order
-		return authMiddleware(rateLimitMiddleware(next))
-	}
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
 }
 
 func routes(middleware func(next http.Handler) http.Handler) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /info", middleware(http.HandlerFunc(infoHandler)).ServeHTTP)
+	mux.HandleFunc("GET /app", middleware(http.HandlerFunc(appHandler)).ServeHTTP)
+	// no middleware for healthz
+	mux.HandleFunc("GET /healthz", healthzHandler)
 	return mux
 }
 
