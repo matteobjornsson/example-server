@@ -28,7 +28,7 @@ func LoadUsersFromCSV(path string) ([]UserRecord, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening csv: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	r := csv.NewReader(f)
 	rows, err := r.ReadAll()
@@ -341,17 +341,51 @@ func (v FakeValidator) Validate(tokenString string) (Claims, error) {
 	}
 }
 
+// allowed requests per minute
+var tierLimits = map[string]int{
+	"free":       5,
+	"pro":        30,
+	"enterprise": 100,
+}
+
 func main() {
 	slog.SetLogLoggerLevel(slog.LevelDebug)
 
-	// configure the settings for a token bucket limiter
-	newTokenBucketLimiter := func(_ string) Limiter {
-		limit := 5
-		refill := 10
-		duration := 1 * time.Minute
-		return NewTokenBucketLimiter(limit, refill, duration)
+	// read in some user specification from csv to determine rate per user
+	users, err := LoadUsersFromCSV("users.csv")
+	if err != nil {
+		slog.Error("failed to load users csv", "error", err)
+		os.Exit(1)
 	}
-	limiterSet := NewMemLimiterSet(newTokenBucketLimiter)
+	for _, u := range users {
+		slog.Info("loaded user from csv", "userID", u.UserID, "tier", u.Tier)
+	}
+
+	userLookup := make(map[string]UserRecord)
+	for _, u := range users {
+		userLookup[u.UserID] = u
+	}
+
+	//close over the user lookup map, pass to the limiter set constructor
+	newSlidingWindowLimiterByUserLookup := func(userID string) Limiter {
+		limit := tierLimits["free"] // default to free tier limit if user not found
+		user, exists := userLookup[userID]
+		if exists {
+			limit = tierLimits[user.Tier]
+			slog.Debug(
+				"user found",
+				"userID",
+				userID,
+				"tier",
+				user.Tier,
+				"limit",
+				limit,
+			)
+		}
+		return NewSlidingWindowLimiter(limit, 1*time.Minute)
+	}
+
+	limiterSet := NewMemLimiterSet(newSlidingWindowLimiterByUserLookup)
 
 	middleware := NewMiddleware(&FakeValidator{}, limiterSet)
 
@@ -360,8 +394,8 @@ func main() {
 		Handler: routes(middleware),
 	}
 
-	if err := srv.ListenAndServe(); err != nil {
-		fmt.Println(fmt.Sprintf("Server error: %v", err))
+	if err = srv.ListenAndServe(); err != nil {
+		slog.Warn("server error", "error", err)
 		os.Exit(1)
 	}
 }
