@@ -138,6 +138,7 @@ func NewSlidingWindowLimiter(
 	duration time.Duration,
 ) *SlidingWindowLimiter {
 	times := make([]time.Time, limit)
+	slog.Debug("new sliding window limiter created", "limit", limit, "duration", duration)
 	return &SlidingWindowLimiter{
 		times:   times,
 		count:   0,
@@ -347,11 +348,17 @@ func (v *UserValidator) Validate(tokenString string) (Claims, error) {
 	return Claims{}, errors.New("invalid token")
 }
 
+const (
+	FreeTierLimit       = 5
+	ProTierLimit        = 30
+	EnterpriseTierLimit = 100
+)
+
 // allowed requests per minute
 var tierLimits = map[string]int{
-	"free":       5,
-	"pro":        30,
-	"enterprise": 100,
+	"free":       FreeTierLimit,
+	"pro":        ProTierLimit,
+	"enterprise": EnterpriseTierLimit,
 }
 
 func main() {
