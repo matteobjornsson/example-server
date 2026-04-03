@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"embed"
 	"encoding/csv"
 	"errors"
 	"fmt"
@@ -16,6 +17,9 @@ type contextKey string
 
 const userIDKey contextKey = "userID"
 
+//go:embed users.csv
+var usersFS embed.FS
+
 // UserRecord represents a row from the CSV
 type UserRecord struct {
 	UserID string
@@ -24,7 +28,7 @@ type UserRecord struct {
 }
 
 func LoadUsersFromCSV(path string) ([]UserRecord, error) {
-	f, err := os.Open(path)
+	f, err := usersFS.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening csv: %w", err)
 	}
