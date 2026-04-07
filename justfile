@@ -5,7 +5,10 @@ db-stop:
     docker stop postgres-dev
 
 db-seed:
-    docker exec postgres-dev psql -U postgres -d example -c "INSERT INTO scoped_tokens (secret, allowed_paths, limiter_rate_per_second, note) VALUES ('testtoken', ARRAY['/app'], 10, 'test') ON CONFLICT DO NOTHING;"
+    docker exec postgres-dev psql -U postgres -d example -c "INSERT INTO tokens (secret, allowed_paths, limiter_rate_per_minute, note) VALUES ('testtoken', ARRAY['/app'], 10, 'test') ON CONFLICT DO NOTHING;"
 
 run:
     POSTGRES_DSN="postgres://postgres:password@localhost:5432/example?sslmode=disable" air
+
+db-shell:
+    docker exec -it postgres-dev psql -U postgres -d example
