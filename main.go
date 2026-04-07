@@ -2,19 +2,20 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
-	"strconv"
-	"time"
 
+	"github.com/lib/pq"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
 type contextKey string
 
-const userIDKey contextKey = "userID"
+const tokenKey contextKey = "token"
 
 func NewAuthMiddleware(validator TokenValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
@@ -36,7 +37,7 @@ func NewAuthMiddleware(validator TokenValidator) func(http.Handler) http.Handler
 				return
 			}
 
-			authCtx := context.WithValue(r.Context(), userIDKey, strconv.Itoa(token.ID))
+			authCtx := context.WithValue(r.Context(), tokenKey, token)
 			next.ServeHTTP(w, r.WithContext(authCtx))
 		})
 	}
@@ -56,17 +57,32 @@ func NewMiddleware(
 }
 
 func appHandler(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value(userIDKey).(string)
-	if !ok || userID == "" {
+	token, ok := r.Context().Value(tokenKey).(*Token)
+	if !ok || token == nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_, err := w.Write([]byte(`{"userId": "` + userID + `"}`))
+	resp := struct {
+		AllowedPaths         pq.StringArray ` json:"allowed_paths"`
+		LimiterRatePerMinute int            `                   json:"limiter_rate_per_minute"`
+		Note                 string         `                   json:"note"`
+	}{
+		AllowedPaths:         token.AllowedPaths,
+		LimiterRatePerMinute: token.LimiterRatePerMinute,
+		Note:                 token.Note,
+	}
+	respBytes, err := json.Marshal(resp)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+
+	_, err = w.Write(respBytes)
 	if err != nil {
 		slog.Error("error writing response", "error", err)
 	}
-	slog.Debug("request processed", "userId", userID)
+	slog.Debug("request processed", "response", fmt.Sprintf("%+v", resp))
 }
 
 func healthzHandler(w http.ResponseWriter, r *http.Request) {
@@ -96,27 +112,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	err = db.AutoMigrate(&ScopedToken{})
+	err = db.AutoMigrate(&Token{})
 	if err != nil {
 		slog.Error("failed to migrate", "error", err)
 		os.Exit(1)
 	}
 
-	newTokenBucketLimiterByTokenID := func(userID string) Limiter {
-		// ai slop... will get back to this
-		id, _ := strconv.Atoi(userID)
-		var token ScopedToken
-		result := db.First(&token, id)
-		if result.Error != nil {
-			return NewTokenBucketLimiter(1, 1, 1*time.Second)
-		}
-		rate := token.LimiterRatePerSecond
-		return NewTokenBucketLimiter(rate, rate, 1*time.Second)
-	}
-
-	limiterSet := NewMemLimiterSet(newTokenBucketLimiterByTokenID)
+	limiterSet := NewMemLimiterSet()
 	tokenValidator := NewDBTokenValidator(db)
-
 	middleware := NewMiddleware(tokenValidator, limiterSet)
 
 	srv := &http.Server{
