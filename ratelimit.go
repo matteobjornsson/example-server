@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"sync"
 	"time"
@@ -11,70 +12,28 @@ type Limiter interface {
 }
 
 type LimiterSet interface {
-	Get(key string) Limiter
+	GetOrInsert(key string, allowedRate int) (Limiter, error)
 }
 
 type MemLimiterSet struct {
-	mu         sync.Mutex
-	limiters   map[string]Limiter
-	newLimiter func(string) Limiter
+	limiters sync.Map
 }
 
-func NewMemLimiterSet(newLimiter func(key string) Limiter) *MemLimiterSet {
-	limiters := make(map[string]Limiter)
-	return &MemLimiterSet{limiters: limiters, newLimiter: newLimiter}
-}
-
-// drawbacks to using map for limiter set: append only, no purging of old limiters
-
-func (m *MemLimiterSet) Get(key string) Limiter {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	limiter, exists := m.limiters[key]
-	if !exists {
-		limiter = m.newLimiter(key)
-		m.limiters[key] = limiter
-	}
-	return limiter
-}
-
-// --- implementations of limiters
-
-type FixedWindowLimiter struct {
-	mu        sync.Mutex
-	count     int
-	limit     int
-	windowEnd time.Time
-	duration  time.Duration
-}
-
-func NewFixedWindowLimiter(limit int, duration time.Duration) *FixedWindowLimiter {
-	return &FixedWindowLimiter{
-		count:    0,
-		limit:    limit,
-		duration: duration,
-		windowEnd: time.Now().
-			Add(duration),
-		// initialize window end to now + duration
+func NewMemLimiterSet() *MemLimiterSet {
+	return &MemLimiterSet{
+		limiters: sync.Map{},
 	}
 }
 
-func (l *FixedWindowLimiter) Allow() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	// each call to the limiter we check if the window needs resetting before
-	// incrementing count
-	if time.Now().After(l.windowEnd) {
-		l.count = 0
-		l.windowEnd = time.Now().Add(l.duration)
+func (m *MemLimiterSet) GetOrInsert(key string, rate int) (Limiter, error) {
+	newLim := NewSlidingMinuteLimiter(rate)
+	// we do not care if loaded, discard bool
+	limiter, _ := m.limiters.LoadOrStore(key, newLim)
+	l, ok := limiter.(Limiter)
+	if !ok {
+		return nil, errors.New("object is not a valid limiter")
 	}
-	if l.count >= l.limit {
-		return false
-	}
-	l.count++
-	return true
+	return l, nil
 }
 
 type SlidingWindowLimiter struct {
@@ -84,6 +43,10 @@ type SlidingWindowLimiter struct {
 	limit   int // max requests allowed in the window
 	window  time.Duration
 	headIdx int // head always points to the oldest valid entry
+}
+
+func NewSlidingMinuteLimiter(limit int) *SlidingWindowLimiter {
+	return NewSlidingWindowLimiter(limit, time.Minute)
 }
 
 func NewSlidingWindowLimiter(
@@ -133,64 +96,25 @@ func (l *SlidingWindowLimiter) Allow() bool {
 	return true
 }
 
-// token bucket adds tokens at rate count/duration and allows requests to consume tokens, if no tokens available, reject request.
-
-type TokenBucketLimiter struct {
-	mu       sync.Mutex
-	limit    float64 // max tokens in bucket
-	tokens   float64 // number of tokens available to requests
-	refill   int     // refill/duration is the rate at which tokens are added to the bucket
-	duration time.Duration
-	lastFill time.Time
-}
-
-func NewTokenBucketLimiter(
-	limit int,
-	refill int,
-	duration time.Duration,
-) *TokenBucketLimiter {
-	return &TokenBucketLimiter{
-		limit:    float64(limit),
-		tokens:   float64(limit), // start with a full bucket
-		refill:   refill,
-		duration: duration,
-		lastFill: time.Now(),
-	}
-}
-
-func (l *TokenBucketLimiter) Allow() bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	now := time.Now()
-	elapsedSeconds := now.Sub(l.lastFill).Seconds()
-
-	refillPerSecond := float64(l.refill) / l.duration.Seconds()
-	// add accumulated tokens (rate*elapsed), cap at limit.
-	l.tokens = min(l.limit, l.tokens+elapsedSeconds*refillPerSecond)
-	l.lastFill = now
-
-	if l.tokens < 1 {
-		// no token for u
-		return false
-	}
-	// consume a token from the bucket
-	l.tokens -= 1
-	return true
-}
-
 func NewRateLimitMiddleware(
 	limiters LimiterSet,
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			userID, ok := r.Context().Value(userIDKey).(string)
-			if !ok || userID == "" {
+			scopedToken, ok := r.Context().Value(tokenKey).(*Token)
+			if !ok || scopedToken == nil {
 				w.WriteHeader(http.StatusInternalServerError)
 				return
 			}
 
-			limiter := limiters.Get(userID)
+			limiter, err := limiters.GetOrInsert(
+				scopedToken.Secret,
+				scopedToken.LimiterRatePerMinute,
+			)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			if !limiter.Allow() {
 				http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 				return
