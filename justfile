@@ -12,3 +12,6 @@ run:
 
 db-shell:
     docker exec -it postgres-dev psql -U postgres -d example
+
+lint:
+    golangci-lint run --timeout 5m
