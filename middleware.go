@@ -123,3 +123,29 @@ func NewRateLimitMiddleware(
 		})
 	}
 }
+
+func NewAuthMiddleware(validator TokenValidator) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			tokenString := r.Header.Get("Authorization")
+			if tokenString == "" {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			token, err := validator.Validate(tokenString)
+			if err != nil {
+				http.Error(w, "Unauthorized", http.StatusUnauthorized)
+				return
+			}
+
+			if !token.Allowed(r) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+
+			authCtx := context.WithValue(r.Context(), tokenKey, token)
+			next.ServeHTTP(w, r.WithContext(authCtx))
+		})
+	}
+}
